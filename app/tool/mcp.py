@@ -1,6 +1,7 @@
 from contextlib import AsyncExitStack
 from typing import Dict, List, Optional
 
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.types import ListToolsResult, TextContent
@@ -8,7 +9,6 @@ from mcp.types import ListToolsResult, TextContent
 from app.logger import logger
 from app.tool.base import BaseTool, ToolResult
 from app.tool.tool_collection import ToolCollection
-from mcp import ClientSession, StdioServerParameters
 
 
 class MCPClientTool(BaseTool):
@@ -75,14 +75,17 @@ class MCPClients(ToolCollection):
         if not command:
             raise ValueError("Server command is required.")
 
-        server_id = server_id or command
+        # Determine the effective server_id to use.
+        # If no specific server_id is provided by the caller for this stdio connection,
+        # default it to "local". Otherwise, use the provided server_id.
+        effective_server_id = server_id if server_id else "local"
 
         # Always ensure clean disconnection before new connection
-        if server_id in self.sessions:
-            await self.disconnect(server_id)
+        if effective_server_id in self.sessions:
+            await self.disconnect(effective_server_id)
 
         exit_stack = AsyncExitStack()
-        self.exit_stacks[server_id] = exit_stack
+        self.exit_stacks[effective_server_id] = exit_stack
 
         server_params = StdioServerParameters(command=command, args=args)
         stdio_transport = await exit_stack.enter_async_context(
@@ -90,9 +93,9 @@ class MCPClients(ToolCollection):
         )
         read, write = stdio_transport
         session = await exit_stack.enter_async_context(ClientSession(read, write))
-        self.sessions[server_id] = session
+        self.sessions[effective_server_id] = session
 
-        await self._initialize_and_list_tools(server_id)
+        await self._initialize_and_list_tools(effective_server_id)
 
     async def _initialize_and_list_tools(self, server_id: str) -> None:
         """Initialize session and populate tool map."""
