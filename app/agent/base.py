@@ -9,6 +9,12 @@ from app.logger import logger
 from app.sandbox.client import SANDBOX_CLIENT
 from app.schema import ROLE_TYPE, AgentState, Memory, Message
 
+# Import ToolCallAgent for instanceof check, allow it to fail gracefully if not always present
+try:
+    from app.agent.toolcall import ToolCallAgent
+except ImportError:
+    ToolCallAgent = None
+
 
 class BaseAgent(BaseModel, ABC):
     """Abstract base class for managing agent state and execution.
@@ -123,35 +129,153 @@ class BaseAgent(BaseModel, ABC):
             A string summarizing the execution results.
 
         Raises:
-            RuntimeError: If the agent is not in IDLE state at start.
+            RuntimeError: If the agent is not in a runnable state.
         """
+        # Allow run if IDLE. If FINISHED, it means main.py might be starting a new "session"
+        # after a previous one fully completed. Reset to IDLE for the new session.
+        if self.state == AgentState.FINISHED:
+            logger.debug(f"Agent was in FINISHED state. Resetting to IDLE for new run.")
+            self.state = AgentState.IDLE
+            self.current_step = 0  # Ensure steps are reset for a conceptually new run
+            # Memory clearing/management for distinct sessions might be needed here
+            # depending on desired long-term conversation behavior.
+
         if self.state != AgentState.IDLE:
-            raise RuntimeError(f"Cannot run agent from state: {self.state}")
+            raise RuntimeError(
+                f"Cannot run agent from state: {self.state}. Expected IDLE."
+            )
 
         if request:
             self.update_memory("user", request)
 
+        self.current_step = 0  # Reset step count for this invocation of run()
+
+        # Manually manage state instead of using state_context to preserve FINISHED state
+        # previous_agent_state = self.state # Should be IDLE here
+        self.state = AgentState.RUNNING
         results: List[str] = []
-        async with self.state_context(AgentState.RUNNING):
-            while (
-                self.current_step < self.max_steps and self.state != AgentState.FINISHED
-            ):
+
+        try:
+            while self.current_step < self.max_steps:
+                if self.state != AgentState.RUNNING:
+                    logger.info(
+                        f"Agent state is {self.state} at beginning of step {self.current_step + 1}. Terminating run loop."
+                    )
+                    break
+
                 self.current_step += 1
                 logger.info(f"Executing step {self.current_step}/{self.max_steps}")
-                step_result = await self.step()
-
-                # Check for stuck state
-                if self.is_stuck():
-                    self.handle_stuck_state()
-
+                step_result = await self.step()  # This calls think() then act()
                 results.append(f"Step {self.current_step}: {step_result}")
 
-            if self.current_step >= self.max_steps:
-                self.current_step = 0
+                if self.is_stuck():  # Check for stuck state
+                    self.handle_stuck_state()
+
+                if self.state == AgentState.FINISHED:
+                    logger.info(
+                        f"Agent run completed: state set to FINISHED by a tool at step {self.current_step}."
+                    )
+                    break
+
+                pause_condition_met = False
+
+                # Log Condition_X components with CRITICAL level
+                condition_x_part1 = ToolCallAgent is not None
+                condition_x_part2 = (
+                    isinstance(self, ToolCallAgent) if ToolCallAgent else False
+                )
+                logger.critical(
+                    f"[CRITICAL_COND_X_CHECK] Step {self.current_step}: ToolCallAgent is not None: {condition_x_part1}"
+                )
+                logger.critical(
+                    f"[CRITICAL_COND_X_CHECK] Step {self.current_step}: isinstance(self, ToolCallAgent): {condition_x_part2}"
+                )
+
+                if condition_x_part1 and condition_x_part2:  # Condition_X
+                    current_tool_calls = getattr(self, "tool_calls", None)
+
+                    # Log Condition_Y components with CRITICAL level
+                    condition_y_part1 = not current_tool_calls
+                    condition_y_part2 = bool(
+                        step_result
+                        and step_result.strip()
+                        and step_result.strip()
+                        != "Thinking complete - no action needed"
+                    )
+                    logger.critical(
+                        f"[CRITICAL_COND_Y_CHECK] Step {self.current_step}: not current_tool_calls: {condition_y_part1}"
+                    )
+                    logger.critical(
+                        f"[CRITICAL_COND_Y_CHECK] Step {self.current_step}: step_result is valid for pause: {condition_y_part2}"
+                    )
+                    logger.critical(
+                        f"[CRITICAL_COND_Y_CHECK] Step {self.current_step}: current_tool_calls value: {current_tool_calls}"
+                    )
+                    logger.critical(
+                        f"[CRITICAL_COND_Y_CHECK] Step {self.current_step}: step_result value snippet: '{str(step_result)[:100]}...'"
+                    )
+
+                    if condition_y_part1 and condition_y_part2:  # Condition_Y
+                        logger.info(
+                            f"[PAUSE_TRIGGERED_LOOP_SIMPLIFIED] Step {self.current_step}: No tools selected, and agent provided a response. Setting state to IDLE."
+                        )
+                        self.state = AgentState.IDLE
+                        pause_condition_met = True
+                elif ToolCallAgent is None:
+                    logger.debug(
+                        f"[PAUSE_CHECK_SKIPPED] Step {self.current_step}: ToolCallAgent is None, skipping pause logic block."
+                    )
+                elif not isinstance(self, ToolCallAgent):
+                    logger.debug(
+                        f"[PAUSE_CHECK_SKIPPED] Step {self.current_step}: self is not isinstance of ToolCallAgent ({type(self)} vs {ToolCallAgent}), skipping pause logic block."
+                    )
+
+                if pause_condition_met:
+                    break
+
+                if self.current_step >= self.max_steps:
+                    logger.info(
+                        f"Reached max steps ({self.max_steps}). Current run cycle terminating."
+                    )
+                    results.append(
+                        f"Terminated current run: Reached max steps ({self.max_steps})."
+                    )
+                    if (
+                        self.state == AgentState.RUNNING
+                    ):  # If not already finished by a tool
+                        self.state = (
+                            AgentState.IDLE
+                        )  # Normal completion due to max_steps
+                    break
+
+            # If loop exited for reasons other than explicit state change (e.g., conditions unmet)
+            # and state is still RUNNING, default to IDLE. This is a safeguard.
+            if self.state == AgentState.RUNNING:
+                logger.warning(
+                    "Agent run loop exited while state was still RUNNING. Forcing to IDLE."
+                )
                 self.state = AgentState.IDLE
-                results.append(f"Terminated: Reached max steps ({self.max_steps})")
-        await SANDBOX_CLIENT.cleanup()
-        return "\n".join(results) if results else "No steps executed"
+
+        except Exception as e:
+            logger.error(f"Error during agent run: {e}", exc_info=True)
+            self.state = AgentState.ERROR
+            results.append(f"Error encountered: {str(e)}")
+            # Do not re-raise, allow run to return and main loop to decide action based on ERROR state.
+        finally:
+            # Ensure agent is not left in RUNNING state.
+            # If it's FINISHED (by Terminate) or ERROR (by exception) or IDLE (by max_steps/pause), that's respected.
+            if (
+                self.state == AgentState.RUNNING
+            ):  # Should ideally be unreachable if logic above is correct
+                logger.error(
+                    "CRITICAL: Agent state was RUNNING in finally block. Forcing to IDLE."
+                )
+                self.state = AgentState.IDLE
+
+            # SANDBOX_CLIENT.cleanup() has been removed from here.
+            # It should be handled by the main entry point script's final cleanup.
+
+        return "\\n".join(results) if results else "No steps executed or run ended."
 
     @abstractmethod
     async def step(self) -> str:
