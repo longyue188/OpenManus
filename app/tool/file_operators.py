@@ -7,7 +7,7 @@ from typing import Optional, Protocol, Tuple, Union, runtime_checkable
 from app.config import SandboxSettings
 from app.exceptions import ToolError
 from app.sandbox.client import SANDBOX_CLIENT
-
+from app.tool.base import CLIResult
 
 PathLike = Union[str, Path]
 
@@ -43,6 +43,7 @@ class LocalFileOperator(FileOperator):
     """File operations implementation for local filesystem."""
 
     encoding: str = "utf-8"
+    fallback_encodings: list[str] = ["utf-8", "gbk", "gb2312", "latin1"]
 
     async def read_file(self, path: PathLike) -> str:
         """Read content from a local file."""
@@ -66,6 +67,43 @@ class LocalFileOperator(FileOperator):
         """Check if path exists."""
         return Path(path).exists()
 
+    async def _view_directory(self, path: PathLike) -> CLIResult:
+        """Display directory contents."""
+        try:
+            path = Path(path)
+            if not path.exists():
+                return CLIResult(error=f"Path does not exist: {path}")
+
+            if not path.is_dir():
+                return CLIResult(error=f"Path is not a directory: {path}")
+
+            # 使用 Python 的 pathlib 来遍历目录
+            result = []
+            for item in path.iterdir():
+                if item.name.startswith("."):
+                    continue
+
+                if item.is_dir():
+                    result.append(f"[DIR] {item.name}/")
+                    # 只遍历第一层子目录
+                    for subitem in item.iterdir():
+                        if not subitem.name.startswith("."):
+                            if subitem.is_dir():
+                                result.append(f"  [DIR] {subitem.name}/")
+                            else:
+                                result.append(f"  [FILE] {subitem.name}")
+                else:
+                    result.append(f"[FILE] {item.name}")
+
+            output = "\n".join(result)
+            if not output:
+                output = "Directory is empty"
+
+            return CLIResult(output=f"Contents of {path}:\n{output}")
+
+        except Exception as e:
+            return CLIResult(error=f"Error listing directory {path}: {str(e)}")
+
     async def run_command(
         self, cmd: str, timeout: Optional[float] = 120.0
     ) -> Tuple[int, str, str]:
@@ -78,10 +116,23 @@ class LocalFileOperator(FileOperator):
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=timeout
             )
+
+            # 尝试使用不同的编码解码输出
+            def decode_with_fallback(data: bytes) -> str:
+                if not data:
+                    return ""
+                for encoding in self.fallback_encodings:
+                    try:
+                        return data.decode(encoding)
+                    except UnicodeDecodeError:
+                        continue
+                # 如果所有编码都失败，使用 latin1 作为最后的选项
+                return data.decode("latin1", errors="replace")
+
             return (
                 process.returncode or 0,
-                stdout.decode(),
-                stderr.decode(),
+                decode_with_fallback(stdout),
+                decode_with_fallback(stderr),
             )
         except asyncio.TimeoutError as exc:
             try:
