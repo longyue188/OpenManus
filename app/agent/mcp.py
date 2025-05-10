@@ -35,7 +35,9 @@ class MCPAgent(ToolCallAgent):
     _refresh_tools_interval: int = 5  # Refresh tools every N steps
 
     # Special tool names that should trigger termination
-    special_tool_names: List[str] = Field(default_factory=lambda: ["terminate"])
+    special_tool_names: List[str] = Field(
+        default_factory=lambda: ["terminate", "mcp_local_terminate"]
+    )
 
     async def initialize(
         self,
@@ -166,8 +168,11 @@ class MCPAgent(ToolCallAgent):
 
     def _should_finish_execution(self, name: str, **kwargs) -> bool:
         """Determine if tool execution should finish the agent"""
-        # Terminate if the tool name is 'terminate'
-        return name.lower() == "terminate"
+        # Terminate if the tool name is 'terminate' or 'mcp_local_terminate'
+        tool_name_lower = name.lower()
+        return (
+            tool_name_lower == "terminate" or tool_name_lower == "mcp_local_terminate"
+        )
 
     async def cleanup(self) -> None:
         """Clean up MCP connection when done."""
