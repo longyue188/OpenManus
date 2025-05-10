@@ -6,6 +6,7 @@ import sys
 from app.agent.mcp import MCPAgent
 from app.config import config
 from app.logger import logger
+from app.schema import AgentState
 
 
 class MCPRunner:
@@ -14,7 +15,7 @@ class MCPRunner:
     def __init__(self):
         self.root_path = config.root_path
         self.server_reference = config.mcp_config.server_reference
-        self.agent = MCPAgent()
+        self.agent: MCPAgent | None = None
 
     async def initialize(
         self,
@@ -23,6 +24,7 @@ class MCPRunner:
     ) -> None:
         """Initialize the MCP agent with the appropriate connection."""
         logger.info(f"Initializing MCPAgent with {connection_type} connection...")
+        self.agent = MCPAgent()
 
         if connection_type == "stdio":
             await self.agent.initialize(
@@ -36,34 +38,104 @@ class MCPRunner:
         logger.info(f"Connected to MCP server via {connection_type}")
 
     async def run_interactive(self) -> None:
-        """Run the agent in interactive mode."""
-        print("\nMCP Agent Interactive Mode (type 'exit' to quit)\n")
+        """Run the agent in interactive mode with continuous input."""
+        if not self.agent:
+            logger.error("Agent not initialized. Cannot run in interactive mode.")
+            return
+
+        logger.info("MCP Agent Interactive Mode (type '退出' or 'exit' to quit)")
         while True:
-            user_input = input("\nEnter your request: ")
-            if user_input.lower() in ["exit", "quit", "q"]:
+            if self.agent.state == AgentState.FINISHED:
+                logger.info(
+                    "MCP Agent has finished its previous task. Ready for new input."
+                )
+                self.agent.state = AgentState.IDLE
+                self.agent.current_step = 0
+
+            user_input = input("\nEnter your request (or '退出'/'exit' to quit): ")
+            if not user_input.strip():
+                logger.warning(
+                    "Empty prompt provided. Please enter a command or '退出'/'exit'."
+                )
+                continue
+
+            if user_input.lower() in ["退出", "exit"]:
+                logger.info("Exiting interactive mode as per user request.")
                 break
-            response = await self.agent.run(user_input)
-            print(f"\nAgent: {response}")
+
+            logger.info(f"Processing request: {user_input}")
+            try:
+                response = await self.agent.run(user_input)
+                logger.info(f"Agent response: {response}")
+                logger.info(
+                    "Request processing completed for this cycle. Waiting for next input."
+                )
+            except Exception as e:
+                logger.error(f"Error during agent execution: {e}", exc_info=True)
+                logger.info(
+                    "Agent encountered an error. Ready for new input or exit command."
+                )
 
     async def run_single_prompt(self, prompt: str) -> None:
         """Run the agent with a single prompt."""
+        if not self.agent:
+            logger.error("Agent not initialized. Cannot run single prompt.")
+            return
+        logger.info(f"Processing single prompt: {prompt}")
         await self.agent.run(prompt)
+        logger.info("Single prompt processing completed.")
 
     async def run_default(self) -> None:
-        """Run the agent in default mode."""
-        prompt = input("Enter your prompt: ")
-        if not prompt.strip():
-            logger.warning("Empty prompt provided.")
+        """Run the agent in default mode, which is now continuous interactive mode."""
+        if not self.agent:
+            logger.error("Agent not initialized. Cannot run in default mode.")
             return
 
-        logger.warning("Processing your request...")
-        await self.agent.run(prompt)
-        logger.info("Request processing completed.")
+        logger.info(
+            "MCP Agent Default (Interactive) Mode (type '退出' or 'exit' to quit)"
+        )
+        while True:
+            if self.agent.state == AgentState.FINISHED:
+                logger.info(
+                    "MCP Agent has finished its previous task. Ready for new input."
+                )
+                self.agent.state = AgentState.IDLE
+                self.agent.current_step = 0
+
+            prompt = input("Enter your prompt (or '退出'/'exit' to quit): ")
+            if not prompt.strip():
+                logger.warning(
+                    "Empty prompt provided. Please enter a command or '退出'/'exit'."
+                )
+                continue
+
+            if prompt.lower() in ["退出", "exit"]:
+                logger.info("Exiting default mode as per user request.")
+                break
+
+            logger.info(f"Processing request: {prompt}")
+            try:
+                response = await self.agent.run(prompt)
+                logger.info(f"Agent response: {response}")
+                logger.info(
+                    "Request processing completed for this cycle. Waiting for next input."
+                )
+            except Exception as e:
+                logger.error(f"Error during agent execution: {e}", exc_info=True)
+                logger.info(
+                    "Agent encountered an error. Ready for new input or exit command."
+                )
 
     async def cleanup(self) -> None:
         """Clean up agent resources."""
-        await self.agent.cleanup()
-        logger.info("Session ended")
+        if self.agent:
+            if hasattr(self.agent, "shutdown_mcp_connections") and callable(
+                getattr(self.agent, "shutdown_mcp_connections")
+            ):
+                await self.agent.shutdown_mcp_connections()
+            else:
+                await self.agent.cleanup()
+        logger.info("MCP session ended and resources cleaned up.")
 
 
 def parse_args() -> argparse.Namespace:

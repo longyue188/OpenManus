@@ -175,16 +175,27 @@ class MCPAgent(ToolCallAgent):
         )
 
     async def cleanup(self) -> None:
-        """Clean up MCP connection when done."""
+        """Generic cleanup, called by ToolCallAgent.run() finally block.
+        This should NOT disconnect the MCP session, as that's handled by shutdown_mcp_connections.
+        """
+        logger.debug(
+            f"MCPAgent ({self.name}): Generic cleanup called. MCP connections remain active."
+        )
+        # Add any other non-connection related cleanup if necessary
+        await super().cleanup()  # Call parent's cleanup for its tools, if any
+
+    async def shutdown_mcp_connections(self) -> None:
+        """Specifically shut down MCP connections. Called when the application is exiting."""
+        logger.info(f"MCPAgent ({self.name}): Shutting down MCP connections...")
         if self.mcp_clients.sessions:
             await self.mcp_clients.disconnect()
-            logger.info("MCP connection closed")
+            logger.info(f"MCPAgent ({self.name}): MCP connections closed.")
+        else:
+            logger.info(f"MCPAgent ({self.name}): No active MCP connections to close.")
 
     async def run(self, request: Optional[str] = None) -> str:
-        """Run the agent with cleanup when done."""
-        try:
-            result = await super().run(request)
-            return result
-        finally:
-            # Ensure cleanup happens even if there's an error
-            await self.cleanup()
+        """Run the agent. Cleanup of MCP connection is handled by MCPRunner at program exit."""
+        # The finally block calling self.cleanup() is removed from here,
+        # as the parent ToolCallAgent.run() already has a finally block that calls self.cleanup().
+        # The overridden self.cleanup() above will ensure MCP connections are not closed prematurely.
+        return await super().run(request)
