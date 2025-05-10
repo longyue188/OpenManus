@@ -15,7 +15,6 @@ from app.tool.file_operators import (
     SandboxFileOperator,
 )
 
-
 Command = Literal[
     "view",
     "create",
@@ -218,18 +217,51 @@ class StrReplaceEditor(BaseTool):
     @staticmethod
     async def _view_directory(path: PathLike, operator: FileOperator) -> CLIResult:
         """Display directory contents."""
-        find_cmd = f"find {path} -maxdepth 2 -not -path '*/\\.*'"
+        try:
+            path = Path(path)
+            if not path.exists():
+                return CLIResult(error=f"Path does not exist: {path}")
 
-        # Execute command using the operator
-        returncode, stdout, stderr = await operator.run_command(find_cmd)
+            if not path.is_dir():
+                return CLIResult(error=f"Path is not a directory: {path}")
 
-        if not stderr:
-            stdout = (
-                f"Here's the files and directories up to 2 levels deep in {path}, "
-                f"excluding hidden items:\n{stdout}\n"
-            )
+            # 使用 Python 的 pathlib 来遍历目录
+            result = []
 
-        return CLIResult(output=stdout, error=stderr)
+            # 首先显示当前目录
+            result.append(f"Current directory: {path.absolute()}")
+            result.append("")
+
+            # 显示目录内容
+            for item in sorted(path.iterdir()):
+                if item.name.startswith("."):
+                    continue
+
+                if item.is_dir():
+                    result.append(f"[DIR] {item.name}/")
+                    # 只遍历第一层子目录
+                    try:
+                        for subitem in sorted(item.iterdir()):
+                            if not subitem.name.startswith("."):
+                                if subitem.is_dir():
+                                    result.append(f"  [DIR] {subitem.name}/")
+                                else:
+                                    result.append(f"  [FILE] {subitem.name}")
+                    except PermissionError:
+                        result.append(
+                            f"  [ERROR] Permission denied to access {item.name}"
+                        )
+                else:
+                    result.append(f"[FILE] {item.name}")
+
+            output = "\n".join(result)
+            if not output:
+                output = "Directory is empty"
+
+            return CLIResult(output=f"Contents of {path}:\n{output}")
+
+        except Exception as e:
+            return CLIResult(error=f"Error listing directory {path}: {str(e)}")
 
     async def _view_file(
         self,
