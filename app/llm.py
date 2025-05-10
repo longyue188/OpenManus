@@ -30,7 +30,6 @@ from app.schema import (
     ToolChoice,
 )
 
-
 REASONING_MODELS = ["o1", "o3-mini"]
 MULTIMODAL_MODELS = [
     "gpt-4-vision-preview",
@@ -465,15 +464,24 @@ class LLM:
         except ValueError:
             logger.exception(f"Validation error")
             raise
-        except OpenAIError as oe:
-            logger.exception(f"OpenAI API error")
-            if isinstance(oe, AuthenticationError):
+        except OpenAIError as e:
+            # Log the request parameters first
+            logger.error(
+                f"OpenAI API call failed. Request params: {{'model': self.model, 'messages': formatted_messages, 'temperature': temperature}}"
+            )
+
+            # Now, handle specific OpenAI errors as before
+            if isinstance(e, AuthenticationError):
                 logger.error("Authentication failed. Check API key.")
-            elif isinstance(oe, RateLimitError):
+            elif isinstance(e, RateLimitError):
                 logger.error("Rate limit exceeded. Consider increasing retry attempts.")
-            elif isinstance(oe, APIError):
-                logger.error(f"API error: {oe}")
-            raise
+            elif isinstance(e, APIError):
+                # This will catch generic API errors, including the 400 for invalid function names
+                logger.error(f"OpenAI API error: {e}")
+            else:
+                # Catch any other OpenAIError that wasn't specifically handled above
+                logger.error(f"An OpenAI error occurred: {e}")
+            raise  # Re-raise the original error after logging
         except Exception:
             logger.exception(f"Unexpected error in ask")
             raise
@@ -537,9 +545,7 @@ class LLM:
             multimodal_content = (
                 [{"type": "text", "text": content}]
                 if isinstance(content, str)
-                else content
-                if isinstance(content, list)
-                else []
+                else content if isinstance(content, list) else []
             )
 
             # Add images to content
@@ -621,15 +627,24 @@ class LLM:
         except ValueError as ve:
             logger.error(f"Validation error in ask_with_images: {ve}")
             raise
-        except OpenAIError as oe:
-            logger.error(f"OpenAI API error: {oe}")
-            if isinstance(oe, AuthenticationError):
+        except OpenAIError as e:
+            # Log the request parameters first
+            logger.error(
+                f"OpenAI API call failed. Request params: {{'model': self.model, 'messages': formatted_messages, 'temperature': temperature}}"
+            )
+
+            # Now, handle specific OpenAI errors as before
+            if isinstance(e, AuthenticationError):
                 logger.error("Authentication failed. Check API key.")
-            elif isinstance(oe, RateLimitError):
+            elif isinstance(e, RateLimitError):
                 logger.error("Rate limit exceeded. Consider increasing retry attempts.")
-            elif isinstance(oe, APIError):
-                logger.error(f"API error: {oe}")
-            raise
+            elif isinstance(e, APIError):
+                # This will catch generic API errors, including the 400 for invalid function names
+                logger.error(f"OpenAI API error: {e}")
+            else:
+                # Catch any other OpenAIError that wasn't specifically handled above
+                logger.error(f"An OpenAI error occurred: {e}")
+            raise  # Re-raise the original error after logging
         except Exception as e:
             logger.error(f"Unexpected error in ask_with_images: {e}")
             raise
@@ -744,22 +759,47 @@ class LLM:
                 response.usage.prompt_tokens, response.usage.completion_tokens
             )
 
-            return response.choices[0].message
+            # Process the response
+            response_message = response.choices[0].message
+            completion_usage = response.usage
+            if completion_usage:
+                self.update_token_count(
+                    completion_usage.prompt_tokens,
+                    completion_usage.completion_tokens,
+                )
 
-        except TokenLimitExceeded:
-            # Re-raise token limit errors without logging
-            raise
+            return response_message
+        except OpenAIError as e:
+            # Log the request parameters first
+            actual_params_to_log = {
+                "model": self.model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "temperature": temperature,
+                "additional_kwargs": kwargs,
+            }
+            logger.error(
+                f"OpenAI API call failed. Request params: {actual_params_to_log}"
+            )
+
+            # Now, handle specific OpenAI errors as before
+            if isinstance(e, AuthenticationError):
+                logger.error("Authentication failed. Check API key.")
+            elif isinstance(e, RateLimitError):
+                logger.error("Rate limit exceeded. Consider increasing retry attempts.")
+            elif isinstance(e, APIError):
+                # This will catch generic API errors, including the 400 for invalid function names
+                logger.error(f"OpenAI API error: {e}")
+            else:
+                # Catch any other OpenAIError that wasn't specifically handled above
+                logger.error(f"An OpenAI error occurred: {e}")
+            raise  # Re-raise the original error after logging
+        except TokenLimitExceeded as e:
+            logger.error(f"Token limit exceeded: {e}")
+            raise  # Re-raise the specific exception
         except ValueError as ve:
             logger.error(f"Validation error in ask_tool: {ve}")
-            raise
-        except OpenAIError as oe:
-            logger.error(f"OpenAI API error: {oe}")
-            if isinstance(oe, AuthenticationError):
-                logger.error("Authentication failed. Check API key.")
-            elif isinstance(oe, RateLimitError):
-                logger.error("Rate limit exceeded. Consider increasing retry attempts.")
-            elif isinstance(oe, APIError):
-                logger.error(f"API error: {oe}")
             raise
         except Exception as e:
             logger.error(f"Unexpected error in ask_tool: {e}")
